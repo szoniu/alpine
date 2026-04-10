@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# config.sh — Save/load configuration using ${VAR@Q} quoting
+source "${LIB_DIR}/protection.sh"
+
+# config_save — Serialize all CONFIG_VARS to a sourceable bash file
+config_save() {
+    local file="${1:-${CONFIG_FILE}}"
+    local dir
+    dir="$(dirname "${file}")"
+    mkdir -p "${dir}"
+
+    # Restrict permissions — file contains password hashes
+    (
+        umask 077
+        {
+            echo "#!/usr/bin/env bash"
+            echo "# Alpine Linux TUI Installer configuration"
+            echo "# Generated: $(date -Iseconds)"
+            echo "# Version: ${INSTALLER_VERSION}"
+            echo ""
+
+            local var
+            for var in "${CONFIG_VARS[@]}"; do
+                if [[ -n "${!var+x}" ]]; then
+                    echo "${var}=${!var@Q}"
+                fi
+            done
+        } > "${file}"
+    )
+
+    einfo "Configuration saved to ${file}"
+}
+
+# config_load — Load configuration from file
+config_load() {
+    local file="${1:-${CONFIG_FILE}}"
+
+    if [[ ! -f "${file}" ]]; then
+        eerror "Configuration file not found: ${file}"
+        return 1
+    fi
+
+    # Build a filtered file with only known CONFIG_VARS assignments
+    local safe_file
+    safe_file=$(mktemp "${TMPDIR:-/tmp}/alpine-config-safe.XXXXXX")
+
+    local line_num=0
+    while IFS= read -r line; do
+        (( line_num++ )) || true
+        # Pass through comments and empty lines
+        if [[ "${line}" =~ ^[[:space:]]*# ]] || [[ "${line}" =~ ^[[:space:]]*$ ]] || [[ "${line}" =~ ^#! ]]; then
+            echo "${line}" >> "${safe_file}"
+            continue
+        fi
+
+        # Must be a known variable assignment
+        local var_name
+        var_name="${line%%=*}"
+        var_name="${var_name%%[[:space:]]*}"
+
+        local found=0
+        local known_var
+        for known_var in "${CONFIG_VARS[@]}"; do
+            if [[ "${var_name}" == "${known_var}" ]]; then
+                found=1
+                break
+            fi
+        done
+
+        if [[ ${found} -eq 0 ]]; then
+            ewarn "Unknown variable at line ${line_num}: ${var_name} (skipping)"
+            continue
+        fi
+        echo "${line}" >> "${safe_file}"
+    done < "${file}"
+
+    # Source the filtered file (only known variables)
+    # shellcheck disable=SC1090
+    source "${safe_file}"
+    rm -f "${safe_file}"
+
+    einfo "Configuration loaded from ${file}"
+}
+
+# config_get — Get a config variable value
+config_get() {
+    local var="$1"
+    echo "${!var:-}"
+}
+
+# config_set — Set a config variable
+config_set() {
+    local var="$1" value="$2"
+
+    local found=0
+    local known_var
+    for known_var in "${CONFIG_VARS[@]}"; do
+        if [[ "${var}" == "${known_var}" ]]; then
+            found=1
+            break
+        fi
+    done
+
+    if [[ ${found} -eq 0 ]]; then
+        ewarn "Setting unknown config variable: ${var}"
+    fi
+
+    printf -v "${var}" '%s' "${value}"
+    export "${var}"
+}
+
+# config_dump — Print current configuration to stdout
+config_dump() {
+    local var
+    for var in "${CONFIG_VARS[@]}"; do
+        if [[ -n "${!var+x}" ]]; then
+            echo "${var}=${!var@Q}"
+        fi
+    done
+}
+
+# config_diff — Compare two config files
+config_diff() {
+    local file1="$1" file2="$2"
+    diff --unified=0 \
+        <(sort "${file1}" | grep -v '^#' | grep -v '^$') \
+        <(sort "${file2}" | grep -v '^#' | grep -v '^$') || true
+}
+
+# validate_config — Check configuration consistency before installation
+# Prints error messages to stdout. Returns 0 if valid, 1 if errors found.
+validate_config() {
+    local -a errors=()
+
+    # --- Required variables (must be non-empty) ---
+    local -a required=(
+        TARGET_DISK FILESYSTEM HOSTNAME TIMEZONE
+        KERNEL_TYPE GPU_VENDOR USERNAME ROOT_PASSWORD_HASH USER_PASSWORD_HASH
+    )
+    local var
+    for var in "${required[@]}"; do
+        if [[ -z "${!var:-}" ]]; then
+            errors+=("${var} is required but not set")
+        fi
+    done
+
+    # --- Enum validation ---
+    if [[ -n "${PARTITION_SCHEME:-}" ]] && \
+       [[ "${PARTITION_SCHEME}" != "auto" && "${PARTITION_SCHEME}" != "dual-boot" && "${PARTITION_SCHEME}" != "manual" ]]; then
+        errors+=("PARTITION_SCHEME='${PARTITION_SCHEME}' — must be auto, dual-boot, or manual")
+    fi
+
+    if [[ -n "${FILESYSTEM:-}" ]] && \
+       [[ "${FILESYSTEM}" != "ext4" && "${FILESYSTEM}" != "btrfs" && "${FILESYSTEM}" != "xfs" ]]; then
+        errors+=("FILESYSTEM='${FILESYSTEM}' — must be ext4, btrfs, or xfs")
+    fi
+
+    if [[ -n "${SWAP_TYPE:-}" ]] && \
+       [[ "${SWAP_TYPE}" != "zram" && "${SWAP_TYPE}" != "partition" && "${SWAP_TYPE}" != "file" && "${SWAP_TYPE}" != "none" ]]; then
+        errors+=("SWAP_TYPE='${SWAP_TYPE}' — must be zram, partition, file, or none")
+    fi
+
+    if [[ -n "${KERNEL_TYPE:-}" ]] && \
+       [[ "${KERNEL_TYPE}" != "lts" && "${KERNEL_TYPE}" != "edge" ]]; then
+        errors+=("KERNEL_TYPE='${KERNEL_TYPE}' — must be lts or edge")
+    fi
+
+    if [[ -n "${BOOTLOADER_TYPE:-}" ]] && \
+       [[ "${BOOTLOADER_TYPE}" != "grub" && "${BOOTLOADER_TYPE}" != "systemd-boot" ]]; then
+        errors+=("BOOTLOADER_TYPE='${BOOTLOADER_TYPE}' — must be grub or systemd-boot")
+    fi
+
+    if [[ -n "${GPU_VENDOR:-}" ]] && \
+       [[ "${GPU_VENDOR}" != "nvidia" && "${GPU_VENDOR}" != "amd" && "${GPU_VENDOR}" != "intel" && "${GPU_VENDOR}" != "none" && "${GPU_VENDOR}" != "unknown" ]]; then
+        errors+=("GPU_VENDOR='${GPU_VENDOR}' — must be nvidia, amd, intel, none, or unknown")
+    fi
+
+    if [[ -n "${DESKTOP_ENV:-}" ]] && \
+       [[ "${DESKTOP_ENV}" != "kde" && "${DESKTOP_ENV}" != "gnome" && "${DESKTOP_ENV}" != "xfce" && "${DESKTOP_ENV}" != "sway" && "${DESKTOP_ENV}" != "niri" && "${DESKTOP_ENV}" != "none" ]]; then
+        errors+=("DESKTOP_ENV='${DESKTOP_ENV}' — must be kde, gnome, xfce, sway, niri, or none")
+    fi
+
+    # --- Format validation ---
+    # Hostname: RFC 1123
+    if [[ -n "${HOSTNAME:-}" ]] && \
+       [[ ! "${HOSTNAME}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
+        errors+=("HOSTNAME='${HOSTNAME}' — invalid (RFC 1123: alphanumeric + hyphens, 1-63 chars)")
+    fi
+
+    # --- Block device checks (skip in DRY_RUN) ---
+    if [[ "${DRY_RUN:-0}" != "1" ]]; then
+        if [[ -n "${TARGET_DISK:-}" && "${PARTITION_SCHEME:-auto}" != "manual" ]] && \
+           [[ ! -b "${TARGET_DISK}" ]]; then
+            errors+=("TARGET_DISK='${TARGET_DISK}' — block device does not exist")
+        fi
+
+        if [[ "${PARTITION_SCHEME:-}" == "dual-boot" && "${ESP_REUSE:-no}" == "yes" ]] && \
+           [[ -n "${ESP_PARTITION:-}" && ! -b "${ESP_PARTITION}" ]]; then
+            errors+=("ESP_PARTITION='${ESP_PARTITION}' — block device does not exist")
+        fi
+
+        if [[ "${PARTITION_SCHEME:-}" == "dual-boot" ]] && \
+           [[ -n "${ROOT_PARTITION:-}" && ! -b "${ROOT_PARTITION}" ]]; then
+            errors+=("ROOT_PARTITION='${ROOT_PARTITION}' — block device does not exist")
+        fi
+    fi
+
+    # --- Cross-field logic ---
+    if [[ "${SWAP_TYPE:-}" == "partition" ]] && \
+       [[ -z "${SWAP_SIZE_MIB:-}" || "${SWAP_SIZE_MIB:-0}" -le 0 ]]; then
+        errors+=("SWAP_TYPE=partition requires SWAP_SIZE_MIB > 0")
+    fi
+
+    if [[ "${PARTITION_SCHEME:-}" == "dual-boot" ]] && \
+       [[ -z "${ESP_PARTITION:-}" ]]; then
+        errors+=("PARTITION_SCHEME=dual-boot requires ESP_PARTITION to be set")
+    fi
+
+    if [[ -n "${SHRINK_PARTITION:-}" ]]; then
+        if [[ -n "${SHRINK_PARTITION_FSTYPE:-}" ]] && \
+           [[ "${SHRINK_PARTITION_FSTYPE}" != "ntfs" && "${SHRINK_PARTITION_FSTYPE}" != "ext4" && "${SHRINK_PARTITION_FSTYPE}" != "btrfs" ]]; then
+            errors+=("SHRINK_PARTITION_FSTYPE='${SHRINK_PARTITION_FSTYPE}' — must be ntfs, ext4, or btrfs")
+        fi
+        if [[ -z "${SHRINK_NEW_SIZE_MIB:-}" || "${SHRINK_NEW_SIZE_MIB:-0}" -le 0 ]]; then
+            errors+=("SHRINK_PARTITION set requires SHRINK_NEW_SIZE_MIB > 0")
+        fi
+    fi
+
+    # --- ESP free space check (dual-boot: shared ESP must have enough room) ---
+    if [[ "${DRY_RUN:-0}" != "1" ]] && \
+       [[ "${PARTITION_SCHEME:-}" == "dual-boot" && "${ESP_REUSE:-no}" == "yes" ]] && \
+       [[ -n "${ESP_PARTITION:-}" && -b "${ESP_PARTITION:-}" ]]; then
+        local _esp_tmp="/tmp/alpine-esp-check-$$"
+        if mkdir -p "${_esp_tmp}" && mount -o ro "${ESP_PARTITION}" "${_esp_tmp}" 2>/dev/null; then
+            local _esp_free_mib
+            _esp_free_mib=$(df -BM "${_esp_tmp}" 2>/dev/null | awk 'NR==2 {gsub(/M/,"",$4); print $4}')
+            umount "${_esp_tmp}" 2>/dev/null
+            rmdir "${_esp_tmp}" 2>/dev/null
+            if [[ -n "${_esp_free_mib}" ]] && [[ "${_esp_free_mib}" -lt 64 ]]; then
+                errors+=("ESP ${ESP_PARTITION} has only ${_esp_free_mib} MiB free — need at least 64 MiB for bootloader + kernel")
+            fi
+        else
+            rmdir "${_esp_tmp}" 2>/dev/null
+        fi
+    fi
+
+    # --- Output ---
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        local err
+        for err in "${errors[@]}"; do
+            echo "- ${err}"
+        done
+        return 1
+    fi
+
+    return 0
+}
