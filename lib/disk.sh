@@ -602,7 +602,7 @@ unmount_filesystems() {
 
     # Unmount in reverse order (anchored match to avoid partial path collisions)
     local -a mounts
-    readarray -t mounts < <(awk -v mp="${MOUNTPOINT}" '$3 == mp || $3 ~ "^"mp"/" {print $3}' /proc/mounts 2>/dev/null | sort -r)
+    readarray -t mounts < <(awk -v mp="${MOUNTPOINT}" '$2 == mp || $2 ~ "^"mp"/" {print $2}' /proc/mounts 2>/dev/null | sort -r)
 
     local mnt
     for mnt in "${mounts[@]}"; do

@@ -236,7 +236,7 @@ preflight_checks() {
     if command -v chronyd &>/dev/null && [[ "${DRY_RUN}" != "1" ]]; then
         try "Syncing system clock" chronyd -q || true
     elif command -v ntpd &>/dev/null && [[ "${DRY_RUN}" != "1" ]]; then
-        try "Syncing system clock" ntpd -q -g || true
+        try "Syncing system clock" ntpd -d -q -p pool.ntp.org || true
     fi
 
     einfo "Preflight checks passed"

@@ -7,6 +7,13 @@ source "${LIB_DIR}/protection.sh"
 
 system_set_timezone() {
     local tz="${TIMEZONE:-UTC}"
+
+    # Validate timezone
+    if [[ ! -f "/usr/share/zoneinfo/${tz}" ]]; then
+        ewarn "Invalid timezone '${tz}', falling back to UTC"
+        tz="UTC"
+    fi
+
     einfo "Setting timezone: ${tz}"
 
     # Install tzdata (not in alpine-base by default)
@@ -35,7 +42,7 @@ system_set_locale() {
     chroot_exec "mkdir -p /etc/profile.d"
     chroot_exec "cat > /etc/profile.d/locale.sh << LOCEOF
 export LANG=${locale}
-export LC_ALL=${locale}
+export LC_COLLATE=${locale}
 LOCEOF"
     chroot_exec "chmod +x /etc/profile.d/locale.sh"
 
@@ -230,8 +237,8 @@ kernel_install() {
         lts)
             apk_install "Installing LTS kernel" linux-lts
             ;;
-        edge)
-            apk_install "Installing edge kernel" linux-edge
+        virt)
+            apk_install "Installing virt kernel" linux-virt
             ;;
     esac
 
@@ -264,7 +271,7 @@ kernel_install() {
 
     # Generate initramfs using mkinitfs (Alpine's initramfs generator)
     try "Generating initramfs" \
-        chroot_exec "mkinitfs"
+        chroot_exec "mkinitfs \$(ls /lib/modules/ | head -1)"
 
     einfo "Kernel installed"
 }
@@ -296,8 +303,10 @@ system_create_users() {
 
     # Set root password (chpasswd -e avoids exposing hash in process list)
     if [[ -n "${ROOT_PASSWORD_HASH:-}" ]]; then
+        echo "root:${ROOT_PASSWORD_HASH}" > "${MOUNTPOINT}/tmp/.pw_hash_$$"
         try "Setting root password" \
-            chroot_exec "echo 'root:${ROOT_PASSWORD_HASH}' | chpasswd -e"
+            chroot_exec "chpasswd -e < /tmp/.pw_hash_$$ && rm -f /tmp/.pw_hash_$$"
+        rm -f "${MOUNTPOINT}/tmp/.pw_hash_$$" 2>/dev/null
     fi
 
     # Create regular user
@@ -338,13 +347,15 @@ system_create_users() {
             chroot_exec "useradd -m -G ${groups} -s ${user_shell} ${USERNAME}"
 
         if [[ -n "${USER_PASSWORD_HASH:-}" ]]; then
+            echo "${USERNAME}:${USER_PASSWORD_HASH}" > "${MOUNTPOINT}/tmp/.pw_hash_$$"
             try "Setting user password" \
-                chroot_exec "echo '${USERNAME}:${USER_PASSWORD_HASH}' | chpasswd -e"
+                chroot_exec "chpasswd -e < /tmp/.pw_hash_$$ && rm -f /tmp/.pw_hash_$$"
+            rm -f "${MOUNTPOINT}/tmp/.pw_hash_$$" 2>/dev/null
         fi
 
         # Setup doas (Alpine uses doas by default, lighter than sudo)
         apk_install_if_available doas
-        chroot_exec "mkdir -p /etc"
+        chroot_exec "mkdir -p /etc/doas.d"
         chroot_exec "echo 'permit persist :wheel' > /etc/doas.d/wheel.conf"
         chroot_exec "chmod 0640 /etc/doas.d/wheel.conf"
 
@@ -378,6 +389,7 @@ system_finalize() {
     chroot_exec "rc-update add sysctl boot" 2>/dev/null || true
     chroot_exec "rc-update add hostname boot" 2>/dev/null || true
     chroot_exec "rc-update add bootmisc boot" 2>/dev/null || true
+    apk_install_if_available busybox-syslogd
     chroot_exec "rc-update add syslog boot" 2>/dev/null || true
 
     chroot_exec "rc-update add mount-ro shutdown" 2>/dev/null || true
