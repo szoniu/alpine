@@ -94,7 +94,7 @@ cd alpine-main
 
 ### 6. Po instalacji
 
-Wyjmij pendrive, reboot. Zobaczysz bootloader (GRUB lub systemd-boot), potem ekran logowania (SDDM/GDM/LightDM/greetd zaleznie od DE).
+Wyjmij pendrive, reboot. Zobaczysz bootloader (GRUB), potem ekran logowania (SDDM/GDM/LightDM/greetd zaleznie od DE).
 
 Po zalogowaniu — aktualizacja systemu i pakietow:
 
@@ -147,7 +147,7 @@ doas apk add pakiet
 | 6 | Swap | zram / partycja / brak |
 | 7 | Siec | Hostname |
 | 8 | Locale | Timezone + keymap |
-| 9 | Bootloader | GRUB / systemd-boot |
+| 9 | Bootloader | GRUB (jedyna opcja) |
 | 10 | Kernel | LTS / Edge |
 | 11 | GPU | AMD (RADV) / Intel (ANV) / NVIDIA (nouveau, open-source) |
 | 12 | Desktop | KDE Plasma / GNOME / XFCE / Sway / niri / brak (console) |
@@ -197,7 +197,7 @@ Installer automatycznie konfiguruje niri z greetd (login manager), waybar, fuzze
 
 ```
 presets/desktop-amd.conf           # AMD + ext4 + GRUB
-presets/desktop-intel.conf         # Intel + btrfs + systemd-boot
+presets/desktop-intel.conf         # Intel + btrfs + GRUB
 presets/desktop-nvidia-open.conf   # NVIDIA (open) + LUKS + GRUB
 ```
 

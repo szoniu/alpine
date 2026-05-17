@@ -14,7 +14,7 @@ What this installer will do:
   * Partition and format your disk
   * Bootstrap Alpine Linux base system
   * Install KDE Plasma desktop with SDDM
-  * Configure bootloader (GRUB or systemd-boot)
+  * Configure bootloader (GRUB UEFI)
 
 Alpine Linux features:
   * musl libc — lightweight and security-oriented

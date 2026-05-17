@@ -38,13 +38,26 @@ system_set_locale() {
     local locale="${LOCALE:-en_US.UTF-8}"
     einfo "Setting locale: ${locale}"
 
-    # /etc/profile.d/locale.sh — main locale config for Alpine (musl-based)
+    # /etc/profile.d/locale.sh — login-shell sessions (TTY, ssh).
     chroot_exec "mkdir -p /etc/profile.d"
     chroot_exec "cat > /etc/profile.d/locale.sh << LOCEOF
 export LANG=${locale}
 export LC_COLLATE=${locale}
 LOCEOF"
     chroot_exec "chmod +x /etc/profile.d/locale.sh"
+
+    # Display managers (SDDM/GDM/LightDM), greetd and elogind/PAM sessions do
+    # NOT source a login shell, so /etc/profile.d alone leaves the GUI in the C
+    # locale. /etc/locale.conf and /etc/environment are read by PAM/elogind and
+    # apply to graphical sessions.
+    chroot_exec "cat > /etc/locale.conf << LOCEOF
+LANG=${locale}
+LC_COLLATE=${locale}
+LOCEOF"
+    chroot_exec "cat > /etc/environment << ENVEOF
+LANG=${locale}
+LC_COLLATE=${locale}
+ENVEOF"
 
     # Install musl-locales for locale data (musl has minimal built-in locale support)
     apk_install_if_available musl-locales
@@ -203,7 +216,6 @@ _generate_fstab_manual() {
         local esp_uuid
         esp_uuid=$(get_uuid "${ESP_PARTITION}")
         local esp_mount="/boot/efi"
-        [[ "${BOOTLOADER_TYPE:-grub}" == "systemd-boot" ]] && esp_mount="/boot"
 
         if [[ -n "${esp_uuid}" ]]; then
             echo "UUID=${esp_uuid}   ${esp_mount}          vfat    noatime,defaults        0 2"
@@ -237,13 +249,19 @@ kernel_install() {
         lts)
             apk_install "Installing LTS kernel" linux-lts
             ;;
-        virt)
-            apk_install "Installing virt kernel" linux-virt
+        edge)
+            apk_install "Installing edge kernel" linux-edge
+            ;;
+        *)
+            ewarn "Unknown kernel type '${kernel_type}', defaulting to linux-lts"
+            kernel_type="lts"
+            apk_install "Installing LTS kernel" linux-lts
             ;;
     esac
 
-    # Install firmware meta-package
-    apk_install "Installing firmware" linux-firmware
+    # Linux firmware (Wi-Fi/GPU). The meta-package name may vary per branch, so
+    # install it best-effort rather than failing the whole phase.
+    apk_install_if_available linux-firmware
 
     # CPU microcode
     local ucode_pkg
@@ -252,26 +270,33 @@ kernel_install() {
         apk_install "Installing CPU microcode" "${ucode_pkg}"
     fi
 
-    # cryptsetup: required for initramfs to pick up /etc/crypttab (LUKS boot)
+    # cryptsetup is needed inside the initramfs for LUKS root.
     if [[ "${LUKS_ENABLED:-no}" == "yes" ]]; then
         apk_install "Installing cryptsetup" cryptsetup
-
-        # Configure mkinitfs features for LUKS
-        local mkinitfs_conf="${MOUNTPOINT}/etc/mkinitfs/mkinitfs.conf"
-        if [[ -f "${mkinitfs_conf}" ]]; then
-            # Add cryptsetup feature if not already present
-            if ! grep -q 'cryptsetup' "${mkinitfs_conf}" 2>/dev/null; then
-                chroot_exec "sed -i 's/features=\"/features=\"cryptsetup /' /etc/mkinitfs/mkinitfs.conf"
-            fi
-        else
-            chroot_exec "mkdir -p /etc/mkinitfs"
-            chroot_exec "echo 'features=\"ata base ide scsi usb virtio ext4 cryptsetup keymap\"' > /etc/mkinitfs/mkinitfs.conf"
-        fi
     fi
 
-    # Generate initramfs using mkinitfs (Alpine's initramfs generator)
+    # mkinitfs.conf features. The stock default (base ata ide scsi usb virtio
+    # ext4) cannot mount a btrfs/xfs root — the system would be unbootable.
+    # Always declare the features matching the chosen filesystem, keymap (for
+    # LUKS passphrase / console), and cryptsetup when encrypted.
+    local features="base ata ide scsi usb virtio nvme mmc keymap kms"
+    case "${FILESYSTEM:-ext4}" in
+        btrfs) features+=" btrfs" ;;
+        xfs)   features+=" xfs ext4" ;;
+        *)     features+=" ext4" ;;
+    esac
+    [[ "${LUKS_ENABLED:-no}" == "yes" ]] && features+=" cryptsetup"
+
+    chroot_exec "mkdir -p /etc/mkinitfs"
+    chroot_exec "echo 'features=\"${features}\"' > /etc/mkinitfs/mkinitfs.conf"
+
+    # Regenerate the initramfs for the exact installed kernel flavor so the
+    # filename (initramfs-${kernel_type}) matches what the bootloader expects.
+    # The linux-* apk trigger already created one with the default config;
+    # this rebuilds it with the features above.
     try "Generating initramfs" \
-        chroot_exec "mkinitfs \$(ls /lib/modules/ | head -1)"
+        chroot_exec "kver=\$(basename /lib/modules/*-${kernel_type} 2>/dev/null); \
+            mkinitfs -o /boot/initramfs-${kernel_type} \${kver:-\$(uname -r)}"
 
     einfo "Kernel installed"
 }
@@ -281,14 +306,31 @@ kernel_install() {
 install_networking() {
     einfo "Installing networking..."
 
-    apk_install "Installing NetworkManager" networkmanager
+    # D-Bus is a hard dependency of NetworkManager (and elogind/polkit later).
+    # It must be installed and enabled regardless of desktop choice, and the
+    # OpenRC init script lives in the dbus-openrc subpackage on modern Alpine.
+    apk_install "Installing D-Bus" dbus dbus-openrc
+    chroot_exec "rc-update add dbus default" 2>/dev/null || true
+
+    # NetworkManager: the OpenRC init script and Wi-Fi backend live in separate
+    # subpackages. networkmanager-wifi pulls wpa_supplicant. Without these,
+    # `rc-update add networkmanager` silently has no init script and Wi-Fi
+    # laptops have no connectivity on first boot.
+    apk_install "Installing NetworkManager" \
+        networkmanager networkmanager-openrc networkmanager-wifi \
+        networkmanager-tui wpa_supplicant
 
     # Enable NetworkManager via OpenRC
     try "Enabling NetworkManager" \
         chroot_exec "rc-update add networkmanager default"
 
-    # Disable default Alpine networking (ifupdown) to avoid conflicts
-    chroot_exec "rc-update del networking default" 2>/dev/null || true
+    # NetworkManager manages interfaces itself; keep the `networking` service
+    # only for the loopback interface.
+    chroot_exec "cat > /etc/network/interfaces << 'NETEOF'
+auto lo
+iface lo inet loopback
+NETEOF" 2>/dev/null || true
+    chroot_exec "rc-update add networking boot" 2>/dev/null || true
 
     einfo "Networking configured"
 }
@@ -311,7 +353,7 @@ system_create_users() {
 
     # Create regular user
     if [[ -n "${USERNAME:-}" ]]; then
-        local groups="${USER_GROUPS:-wheel,audio,video,input,plugdev}"
+        local groups="${USER_GROUPS:-wheel,audio,video,input,plugdev,seat}"
 
         # Filter out groups that don't exist on the target system
         local valid_groups=""
@@ -323,7 +365,7 @@ system_create_users() {
             else
                 # Try to create common groups that may not exist yet
                 case "${g}" in
-                    plugdev|input)
+                    plugdev|input|seat)
                         chroot_exec "addgroup ${g}" 2>/dev/null || true
                         valid_groups+="${valid_groups:+,}${g}"
                         ;;
@@ -373,36 +415,85 @@ system_create_users() {
     fi
 }
 
+# --- Device manager ---
+
+# _setup_device_manager — eudev (udev) for desktops, mdev for headless.
+# Running both mdev and eudev simultaneously corrupts device nodes, so the
+# manager is selected exclusively. Desktops (libinput, DRM/KMS, GPU) need udev.
+_setup_device_manager() {
+    if [[ "${DESKTOP_ENV:-none}" != "none" ]]; then
+        einfo "Configuring eudev device manager (desktop)..."
+        apk_install "Installing eudev" eudev
+
+        # eudev OpenRC scripts: udev/udev-trigger/udev-settle in sysinit,
+        # udev-postmount in default. mdev must NOT be enabled alongside.
+        chroot_exec "rc-update del mdev sysinit" 2>/dev/null || true
+        chroot_exec "rc-update add udev sysinit" 2>/dev/null || true
+        chroot_exec "rc-update add udev-trigger sysinit" 2>/dev/null || true
+        chroot_exec "rc-update add udev-settle sysinit" 2>/dev/null || true
+        chroot_exec "rc-update add udev-postmount default" 2>/dev/null || true
+    else
+        einfo "Configuring mdev device manager (headless)..."
+        chroot_exec "rc-update add mdev sysinit" 2>/dev/null || true
+    fi
+}
+
 # --- Finalization ---
 
 system_finalize() {
     einfo "Finalizing system..."
 
-    # Enable essential OpenRC services
-    chroot_exec "rc-update add devfs sysinit" 2>/dev/null || true
-    chroot_exec "rc-update add dmesg sysinit" 2>/dev/null || true
-    chroot_exec "rc-update add mdev sysinit" 2>/dev/null || true
-    chroot_exec "rc-update add hwdrivers sysinit" 2>/dev/null || true
+    # Enable the core OpenRC runlevels.
+    #
+    # `apk add --root --initdb alpine-base` does NOT populate /etc/runlevels
+    # (the official setup-disk/setup-alpine scripts do that). Without this an
+    # otherwise-correct install boots degraded: no /etc/fstab mounts (ESP, /tmp),
+    # no swap, no fsck, no entropy seeding. We replicate a stock Alpine layout.
+    _rc_add() { chroot_exec "rc-update add $1 $2" 2>/dev/null || true; }
 
-    chroot_exec "rc-update add hwclock boot" 2>/dev/null || true
-    chroot_exec "rc-update add modules boot" 2>/dev/null || true
-    chroot_exec "rc-update add sysctl boot" 2>/dev/null || true
-    chroot_exec "rc-update add hostname boot" 2>/dev/null || true
-    chroot_exec "rc-update add bootmisc boot" 2>/dev/null || true
-    apk_install_if_available busybox-syslogd
-    chroot_exec "rc-update add syslog boot" 2>/dev/null || true
+    # --- sysinit: device manager + early kernel plumbing ---
+    # Device manager (eudev vs mdev) is configured in _setup_device_manager;
+    # here we only add the manager-agnostic services.
+    _rc_add devfs sysinit
+    _rc_add dmesg sysinit
+    _rc_add cgroups sysinit
+    _rc_add hwdrivers sysinit
 
-    chroot_exec "rc-update add mount-ro shutdown" 2>/dev/null || true
-    chroot_exec "rc-update add killprocs shutdown" 2>/dev/null || true
-    chroot_exec "rc-update add savecache shutdown" 2>/dev/null || true
-
-    # Enable udev for proper device management (needed for desktop)
-    if [[ "${DESKTOP_ENV:-none}" != "none" ]]; then
-        apk_install_if_available eudev
-        chroot_exec "setup-devd udev" 2>/dev/null || true
+    # --- boot: mount fstab, swap, fsck, clock, modules, entropy ---
+    _rc_add modules boot
+    _rc_add sysctl boot
+    _rc_add hostname boot
+    _rc_add bootmisc boot
+    _rc_add hwclock boot   # RTC-backed; swclock is for RTC-less boards only
+    _rc_add seedrng boot
+    _rc_add fsck boot
+    _rc_add root boot
+    _rc_add localmount boot      # mounts ESP, /tmp and extra fstab entries
+    if [[ "${SWAP_TYPE:-}" == "partition" || "${SWAP_TYPE:-}" == "zram" ]]; then
+        _rc_add swap boot
     fi
+    apk_install_if_available busybox-syslogd
+    _rc_add syslog boot
+    _rc_add klogd boot
 
-    # Generate machine-id
+    # --- default: late services ---
+    _rc_add netmount default
+    _rc_add local default
+    apk_install_if_available acpid
+    _rc_add acpid default
+    apk_install_if_available cronie
+    _rc_add crond default
+
+    # --- shutdown ---
+    _rc_add mount-ro shutdown
+    _rc_add killprocs shutdown
+    _rc_add savecache shutdown
+
+    # Device manager: eudev (udev) for desktops, mdev otherwise.
+    _setup_device_manager
+
+    # Generate machine-id (dbus is installed in install_networking).
+    chroot_exec "dbus-uuidgen --ensure=/var/lib/dbus/machine-id" 2>/dev/null || true
     chroot_exec "dbus-uuidgen --ensure=/etc/machine-id" 2>/dev/null || true
 
     # Set correct date/time inside chroot if possible

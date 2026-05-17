@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# tui/kernel_select.sh — Kernel selection: LTS or virt
+# tui/kernel_select.sh — Kernel selection: LTS or edge
 source "${LIB_DIR}/protection.sh"
 
 screen_kernel_select() {
     local current="${KERNEL_TYPE:-lts}"
-    local on_lts="off" on_virt="off"
+    local on_lts="off" on_edge="off"
     case "${current}" in
         lts)  on_lts="on" ;;
-        virt) on_virt="on" ;;
+        edge) on_edge="on" ;;
     esac
 
     local choice
     choice=$(dialog_radiolist "Kernel Selection" \
         "lts"  "linux-lts — Long Term Support (recommended)" "${on_lts}" \
-        "virt" "linux-virt — Lightweight virtual/cloud kernel" "${on_virt}") \
+        "edge" "linux-edge — Latest kernel (newest hardware support)" "${on_edge}") \
         || return "${TUI_BACK}"
 
     if [[ -z "${choice}" ]]; then

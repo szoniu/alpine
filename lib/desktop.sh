@@ -16,6 +16,9 @@ desktop_install() {
     # Install GPU drivers first (shared)
     _install_gpu_drivers
 
+    # Shared base: fonts, polkit, session management. Needed by every DE.
+    _install_common_desktop
+
     case "${de}" in
         kde)   _install_kde ;;
         gnome) _install_gnome ;;
@@ -29,16 +32,50 @@ desktop_install() {
     _install_bluetooth
     _install_extras
 
-    # Ensure elogind is installed and enabled (session management for all DEs)
-    _install_elogind
-
     einfo "Desktop installation complete"
+}
+
+# _install_common_desktop — Packages/services every desktop needs out of box:
+# fonts (a bare Alpine has no scalable fonts → tofu everywhere), polkit, and
+# elogind session management.
+_install_common_desktop() {
+    einfo "Installing common desktop base (fonts, polkit, elogind)..."
+
+    apk_install "Installing fonts" \
+        font-dejavu font-noto font-noto-emoji ttf-liberation \
+        fontconfig
+
+    # polkit + elogind authentication agent backend (shared by all DEs).
+    apk_install "Installing polkit" polkit polkit-elogind
+
+    # elogind: seat/session manager (replaces systemd-logind). Must be in the
+    # boot runlevel so a seat exists before display managers / greetd start.
+    apk_install "Installing elogind" elogind
+    chroot_exec "rc-update add elogind boot" 2>/dev/null || true
+    chroot_exec "rc-update add polkit default" 2>/dev/null || true
+
+    # dbus is installed/enabled in install_networking; ensure it is present
+    # even if networking somehow ran without it.
+    apk_install_if_available dbus
+    chroot_exec "rc-update add dbus default" 2>/dev/null || true
+}
+
+# _install_xorg — X server stack for X11 desktops / display managers.
+# SDDM and LightDM run on X by default; without xorg-server the greeter cannot
+# start and there is no login screen at all.
+_install_xorg() {
+    apk_install "Installing Xorg" \
+        xorg-server xf86-input-libinput xf86-video-fbdev \
+        xinit xrandr setxkbmap xwayland mesa-dri-gallium
 }
 
 # --- KDE Plasma ---
 
 _install_kde() {
     einfo "Installing KDE Plasma desktop..."
+
+    # SDDM (default Plasma greeter) runs on X — Xorg stack is mandatory.
+    _install_xorg
 
     apk_install "Installing KDE Plasma" \
         plasma-desktop plasma-workspace plasma-pa plasma-nm \
@@ -84,8 +121,14 @@ _install_kde_lang() {
 
     einfo "Installing KDE language packs for: ${lang}"
 
+    # Alpine has no legacy `kde-l10n`; translations ship as per-component
+    # *-lang subpackages.
     local -a lang_pkgs=(
-        kde-l10n
+        plasma-desktop-lang
+        plasma-workspace-lang
+        kde-cli-tools-lang
+        dolphin-lang
+        konsole-lang
     )
 
     local pkg
@@ -133,9 +176,13 @@ PLEOF"
 _install_gnome() {
     einfo "Installing GNOME desktop..."
 
+    # GDM/GNOME run on Wayland but need Xorg for the X11 session + Xwayland.
+    _install_xorg
+
     apk_install "Installing GNOME" \
         gnome-shell gnome-session gnome-control-center gnome-terminal \
-        nautilus gnome-tweaks adwaita-icon-theme
+        nautilus gnome-tweaks adwaita-icon-theme gnome-keyring \
+        xdg-desktop-portal-gnome xdg-user-dirs
     apk_install "Installing GDM" gdm
 
     # dconf + accountsservice needed for locale/session configuration
@@ -231,9 +278,13 @@ GISEOF"
 _install_xfce() {
     einfo "Installing XFCE desktop..."
 
+    # XFCE is X11-only and LightDM runs on X — Xorg stack is mandatory.
+    _install_xorg
+
     apk_install "Installing XFCE" \
         xfce4 xfce4-terminal xfce4-screensaver mousepad \
-        thunar thunar-volman ristretto
+        thunar thunar-volman ristretto xfce4-pulseaudio-plugin \
+        xfce4-power-manager network-manager-applet
     apk_install "Installing LightDM" lightdm lightdm-gtk-greeter
 
     _install_xfce_apps
@@ -262,6 +313,33 @@ _install_xfce_apps() {
     fi
 }
 
+# _setup_greetd_seat — seat management + greetd for wlroots compositors.
+# Sway/niri need a seat: seatd (libseat) + the user in the `seat` group, plus
+# elogind (enabled in _install_common_desktop, boot runlevel). Without this the
+# compositor dies with "Cannot get DRM master" → black screen.
+# $1 = session command run by agreety (e.g. "sway", "niri-session")
+_setup_greetd_seat() {
+    local session_cmd="$1"
+
+    apk_install "Installing seatd" seatd
+    chroot_exec "rc-update add seatd default" 2>/dev/null || true
+
+    apk_install "Installing greetd" greetd greetd-agreety
+    chroot_exec "rc-update add greetd default" 2>/dev/null || true
+
+    chroot_exec "mkdir -p /etc/greetd"
+    chroot_exec "cat > /etc/greetd/config.toml << GREETEOF
+[terminal]
+vt = 7
+
+[default_session]
+command = \"agreety --cmd ${session_cmd}\"
+user = \"greetd\"
+GREETEOF"
+    # greetd reads its config as the greetd user.
+    chroot_exec "chown -R greetd:greetd /etc/greetd 2>/dev/null || true"
+}
+
 # --- Sway ---
 
 _install_sway() {
@@ -270,31 +348,13 @@ _install_sway() {
     apk_install "Installing Sway" \
         sway swaylock swayidle swaybg foot \
         waybar wofi mako grim slurp wl-clipboard \
-        brightnessctl xdg-desktop-portal-wlr
+        brightnessctl xdg-desktop-portal-wlr polkit-elogind \
+        xwayland
 
     _install_sway_apps
 
-    # Sway doesn't need a display manager — can be launched from TTY
-    # But we can use greetd for a graphical login
-    if chroot_exec "apk search -e greetd" >> "${LOG_FILE}" 2>&1; then
-        apk_install "Installing greetd" greetd greetd-agreety
-        try "Enabling greetd" \
-            chroot_exec "rc-update add greetd default"
-
-        # Configure greetd to launch Sway
-        chroot_exec "mkdir -p /etc/greetd"
-        chroot_exec "cat > /etc/greetd/config.toml << 'GREETEOF'
-[terminal]
-vt = 7
-
-[default_session]
-command = \"agreety --cmd sway\"
-GREETEOF"
-    fi
-
-    # dbus
-    try "Enabling dbus" \
-        chroot_exec "rc-update add dbus default" 2>/dev/null || true
+    # Seat management + graphical login (greetd + seatd).
+    _setup_greetd_seat "sway"
 
     # Create Sway session file for display managers
     if ! chroot_exec "test -f /usr/share/wayland-sessions/sway.desktop" 2>/dev/null; then
@@ -339,30 +399,13 @@ _install_niri() {
     # Install companion tools (niri is a compositor, needs supporting tools)
     apk_install "Installing niri companion tools" \
         waybar fuzzel mako grim slurp wl-clipboard \
-        brightnessctl foot xdg-desktop-portal-gnome
+        brightnessctl foot xdg-desktop-portal-gnome \
+        polkit-elogind xwayland
 
     _install_niri_apps
 
-    # Use greetd as login manager for niri
-    if chroot_exec "apk search -e greetd" >> "${LOG_FILE}" 2>&1; then
-        apk_install "Installing greetd" greetd greetd-agreety
-        try "Enabling greetd" \
-            chroot_exec "rc-update add greetd default"
-
-        # Configure greetd to launch niri
-        chroot_exec "mkdir -p /etc/greetd"
-        chroot_exec "cat > /etc/greetd/config.toml << 'GREETEOF'
-[terminal]
-vt = 7
-
-[default_session]
-command = \"agreety --cmd niri-session\"
-GREETEOF"
-    fi
-
-    # dbus
-    try "Enabling dbus" \
-        chroot_exec "rc-update add dbus default" 2>/dev/null || true
+    # Seat management + graphical login (greetd + seatd).
+    _setup_greetd_seat "niri-session"
 
     # Create niri session file for display managers
     if ! chroot_exec "test -f /usr/share/wayland-sessions/niri.desktop" 2>/dev/null; then
@@ -394,14 +437,6 @@ _install_niri_apps() {
 }
 
 # --- Shared ---
-
-# _install_elogind — Install elogind for session management (replaces logind)
-_install_elogind() {
-    einfo "Installing elogind (session management)..."
-    apk_install "Installing elogind" elogind polkit-elogind
-    try "Enabling elogind" \
-        chroot_exec "rc-update add elogind default" 2>/dev/null || true
-}
 
 # _install_gpu_drivers — Install GPU-specific open-source drivers
 _install_gpu_drivers() {
@@ -436,10 +471,14 @@ _install_gpu_drivers() {
 
 _install_nvidia_open() {
     einfo "Installing NVIDIA open-source drivers (nouveau)..."
-    apk_install_if_available mesa-vulkan-nouveau
+    # Alpine has no `mesa-vulkan-nouveau`. nouveau GL is provided by the
+    # gallium DRI driver (installed in _install_gpu_drivers); add the swrast
+    # Vulkan ICD as a software fallback so Vulkan apps still run.
+    apk_install_if_available mesa-vulkan-swrast
     apk_install_if_available linux-firmware-nvidia
-    ewarn "Note: Alpine Linux does not support NVIDIA proprietary drivers."
-    ewarn "Using nouveau (open-source). Performance may be limited."
+    apk_install_if_available xf86-video-nouveau
+    ewarn "Note: Alpine does not support NVIDIA proprietary drivers."
+    ewarn "Using nouveau (open-source). Vulkan falls back to software (slow)."
 }
 
 _install_amd_drivers() {
@@ -459,10 +498,40 @@ _install_intel_drivers() {
 # _install_pipewire — Install PipeWire audio system
 _install_pipewire() {
     einfo "Installing PipeWire audio..."
-    apk_install "Installing PipeWire" pipewire wireplumber pipewire-pulse
+    apk_install "Installing PipeWire" \
+        pipewire wireplumber pipewire-pulse pipewire-alsa \
+        pipewire-jack alsa-utils
 
-    # PipeWire autostart via XDG autostart (elogind handles session)
-    einfo "PipeWire installed (managed by elogind session)"
+    # rtkit gives PipeWire realtime priority (glitch-free audio).
+    apk_install_if_available rtkit
+
+    # Alpine's pipewire package does not ship XDG autostart files. Without an
+    # autostart there is no sound on any desktop. Add session-agnostic entries
+    # that every DE's autostart honours.
+    chroot_exec "mkdir -p /etc/xdg/autostart"
+    chroot_exec "cat > /etc/xdg/autostart/pipewire.desktop << 'PWEOF'
+[Desktop Entry]
+Type=Application
+Name=PipeWire Media System
+Exec=/usr/bin/pipewire
+X-GNOME-Autostart-Phase=Initialization
+PWEOF"
+    chroot_exec "cat > /etc/xdg/autostart/wireplumber.desktop << 'WPEOF'
+[Desktop Entry]
+Type=Application
+Name=WirePlumber Session Manager
+Exec=/usr/bin/wireplumber
+X-GNOME-Autostart-Phase=Initialization
+WPEOF"
+    chroot_exec "cat > /etc/xdg/autostart/pipewire-pulse.desktop << 'PPEOF'
+[Desktop Entry]
+Type=Application
+Name=PipeWire PulseAudio
+Exec=/usr/bin/pipewire-pulse
+X-GNOME-Autostart-Phase=Initialization
+PPEOF"
+
+    einfo "PipeWire installed (XDG autostart configured)"
 }
 
 # _install_bluetooth — Auto-install Bluetooth support if hardware detected

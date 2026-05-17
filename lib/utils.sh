@@ -552,14 +552,9 @@ _infer_from_fstab() {
                     ESP_PARTITION="${dev}"
                     export ESP_PARTITION
                 fi
-                # Infer bootloader type from ESP mount point
-                if [[ "${mpoint}" == "/boot" ]]; then
-                    BOOTLOADER_TYPE="systemd-boot"
-                    export BOOTLOADER_TYPE
-                elif [[ "${mpoint}" == "/boot/efi" ]]; then
-                    BOOTLOADER_TYPE="grub"
-                    export BOOTLOADER_TYPE
-                fi
+                # Alpine only supports GRUB.
+                BOOTLOADER_TYPE="grub"
+                export BOOTLOADER_TYPE
                 ;;
         esac
 

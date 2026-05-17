@@ -5,7 +5,7 @@ source "${LIB_DIR}/protection.sh"
 # Default Alpine mirror
 : "${ALPINE_MIRROR:=https://dl-cdn.alpinelinux.org/alpine}"
 # Alpine release branch (v3.23 for stable, edge for latest)
-: "${ALPINE_BRANCH:=v3.21}"
+: "${ALPINE_BRANCH:=v3.23}"
 
 # bootstrap_install — Install base Alpine Linux system using apk --root
 bootstrap_install() {
@@ -61,7 +61,6 @@ REPOEOF
     # Re-mount ESP if it was unmounted during cleanup
     if [[ -n "${ESP_PARTITION:-}" ]]; then
         local esp_path="${MOUNTPOINT}/boot/efi"
-        [[ "${BOOTLOADER_TYPE:-grub}" == "systemd-boot" ]] && esp_path="${MOUNTPOINT}/boot"
         mkdir -p "${esp_path}"
         if ! mountpoint -q "${esp_path}" 2>/dev/null; then
             mount "${ESP_PARTITION}" "${esp_path}" 2>/dev/null || true

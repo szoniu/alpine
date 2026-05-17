@@ -40,7 +40,7 @@ lib/
 ├── bootstrap.sh        — apk --root --initdb, apk_install, apk_update, enable_community_repo, enable_testing_repo
 ├── chroot.sh           — Manual bind mounts, plain chroot, DNS copy
 ├── system.sh           — timezone, hostname, keymap, fstab, mkinitfs, networking (NetworkManager+OpenRC), users (shadow+doas), finalize (OpenRC services)
-├── bootloader.sh       — GRUB (grub-mkconfig) lub systemd-boot (manual entries)
+├── bootloader.sh       — GRUB only (grub-mkconfig); systemd-boot niedostepny (brak systemd na Alpine)
 ├── desktop.sh          — KDE/GNOME/XFCE/Sway/niri, SDDM/GDM/LightDM/greetd, PipeWire, elogind, GPU drivers, extras
 ├── swap.sh             — zram (OpenRC init script), swap partition
 ├── hooks.sh            — maybe_exec 'before_X' / 'after_X'
@@ -55,7 +55,7 @@ tui/
 ├── swap_config.sh      — zram/partition/none
 ├── network_config.sh   — hostname
 ├── locale_config.sh    — timezone + keymap
-├── bootloader_select.sh — GRUB vs systemd-boot
+├── bootloader_select.sh — GRUB (jedyna opcja, bez ekranu wyboru)
 ├── kernel_select.sh    — lts/edge
 ├── gpu_config.sh       — AMD(radv)/Intel(anv)/NVIDIA(nouveau) — all open-source
 ├── desktop_config.sh   — KDE/GNOME/XFCE/Sway/niri/none + apps + flatpak/printing/bluetooth
@@ -87,12 +87,12 @@ hooks/                  — *.sh.example
 - `install_networking()` — NetworkManager + `rc-update add networkmanager default`
 - `system_create_users()` — shadow (useradd), doas (nie sudo), SSH
 - `generate_fstab()` — manualna generacja (Alpine nie ma genfstab)
-- `system_finalize()` — wlaczanie uslug OpenRC (devfs, dmesg, mdev, hwdrivers, hwclock, modules, sysctl, hostname, bootmisc, syslog, eudev)
+- `system_finalize()` — wlaczanie PELNEGO zestawu uslug OpenRC (apk --initdb NIE populuje runlevels): sysinit (devfs/dmesg/cgroups/hwdrivers), boot (modules/sysctl/hostname/bootmisc/hwclock/seedrng/fsck/root/localmount/swap/syslog), default (netmount/local/acpid/crond), shutdown. `_setup_device_manager` — eudev (udev/udev-trigger/udev-settle, mdev usuniety) dla desktopu, mdev dla headless
 
 #### lib/bootloader.sh
-- GRUB: `grub grub-efi` + `grub-install --target=x86_64-efi` + `grub-mkconfig -o /boot/grub/grub.cfg`
-- systemd-boot: `efibootmgr` + manual loader.conf + boot entries
-- Oba z wsparciem LUKS i dual-boot
+- GRUB only: `grub grub-efi` + `grub-install --target=x86_64-efi` + `grub-mkconfig -o /boot/grub/grub.cfg`
+- ESP zawsze montowany w `/boot/efi`
+- Wsparcie LUKS i dual-boot (os-prober)
 
 #### lib/desktop.sh — 6 srodowisk
 - **KDE Plasma**: plasma-desktop + sddm + elogind

@@ -569,15 +569,9 @@ mount_filesystems() {
     # CRITICAL: Alpine Linux requires correct permissions on root
     chmod 755 "${MOUNTPOINT}"
 
-    # Mount boot and ESP
-    if [[ "${BOOTLOADER_TYPE:-grub}" == "systemd-boot" ]]; then
-        mkdir -p "${MOUNTPOINT}/boot"
-        try "Mounting ESP at /boot" mount "${ESP_PARTITION}" "${MOUNTPOINT}/boot"
-    else
-        mkdir -p "${MOUNTPOINT}/boot"
-        mkdir -p "${MOUNTPOINT}/boot/efi"
-        try "Mounting ESP at /boot/efi" mount "${ESP_PARTITION}" "${MOUNTPOINT}/boot/efi"
-    fi
+    # Mount ESP (GRUB on Alpine always uses /boot/efi)
+    mkdir -p "${MOUNTPOINT}/boot/efi"
+    try "Mounting ESP at /boot/efi" mount "${ESP_PARTITION}" "${MOUNTPOINT}/boot/efi"
 
     # Activate swap if partition
     if [[ "${SWAP_TYPE:-}" == "partition" && -n "${SWAP_PARTITION:-}" ]]; then

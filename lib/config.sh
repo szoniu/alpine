@@ -161,13 +161,13 @@ validate_config() {
     fi
 
     if [[ -n "${KERNEL_TYPE:-}" ]] && \
-       [[ "${KERNEL_TYPE}" != "lts" && "${KERNEL_TYPE}" != "virt" ]]; then
-        errors+=("KERNEL_TYPE='${KERNEL_TYPE}' — must be lts or virt")
+       [[ "${KERNEL_TYPE}" != "lts" && "${KERNEL_TYPE}" != "edge" ]]; then
+        errors+=("KERNEL_TYPE='${KERNEL_TYPE}' — must be lts or edge")
     fi
 
     if [[ -n "${BOOTLOADER_TYPE:-}" ]] && \
        [[ "${BOOTLOADER_TYPE}" != "grub" ]]; then
-        errors+=("BOOTLOADER_TYPE='${BOOTLOADER_TYPE}' — must be grub or systemd-boot")
+        errors+=("BOOTLOADER_TYPE='${BOOTLOADER_TYPE}' — must be grub")
     fi
 
     if [[ -n "${GPU_VENDOR:-}" ]] && \
