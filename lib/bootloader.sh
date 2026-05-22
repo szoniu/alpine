@@ -24,6 +24,18 @@ _install_grub() {
         try "Mounting ESP" mount "${ESP_PARTITION}" "${MOUNTPOINT}${efi_dir}"
     fi
 
+    # Build kernel cmdline (GRUB_CMDLINE_LINUX_DEFAULT)
+    local default_params="quiet"
+
+    # UMPC portrait-panel quirk: fbcon for early console + panel_orientation
+    # for KMS-aware compositors (KWin, Mutter). Without this the first boot
+    # (GRUB → console → SDDM/GDM → Plasma/GNOME) shows the image rotated
+    # because the panel is mounted physically rotated relative to the casing.
+    if [[ "${UMPC_DETECTED:-0}" == "1" ]] && [[ -n "${UMPC_PANEL_ORIENTATION:-}" ]]; then
+        default_params="${default_params} fbcon=rotate:${UMPC_FBCON_ROTATE} video=${UMPC_VIDEO_CONNECTOR}:panel_orientation=${UMPC_PANEL_ORIENTATION}"
+        einfo "UMPC panel rotation applied to GRUB_CMDLINE_LINUX_DEFAULT"
+    fi
+
     # Configure /etc/default/grub BEFORE grub-install (LUKS requires CRYPTODISK=y at install time)
     chroot_exec "mkdir -p /etc/default"
     chroot_exec "cat > /etc/default/grub << 'GRUBEOF'
@@ -31,8 +43,11 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=5
 GRUB_TIMEOUT_STYLE=menu
 GRUB_DISTRIBUTOR=\"Alpine\"
-GRUB_CMDLINE_LINUX_DEFAULT=\"quiet\"
+GRUB_CMDLINE_LINUX_DEFAULT=\"__DEFAULT_PARAMS__\"
 GRUBEOF"
+    # Inject the assembled kernel cmdline (kept out of the quoted heredoc so
+    # the params — incl. UMPC video= with ':' — are written verbatim).
+    chroot_exec "sed -i 's|__DEFAULT_PARAMS__|${default_params}|' /etc/default/grub"
 
     if [[ "${LUKS_ENABLED:-no}" == "yes" ]]; then
         chroot_exec "cat >> /etc/default/grub << 'GRUBEOF'

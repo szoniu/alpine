@@ -204,6 +204,19 @@ is_root() {
     [[ "$(id -u)" -eq 0 ]]
 }
 
+# is_supported_arch — This installer is hardwired for x86_64. The Alpine
+# minirootfs/apk packages, grub-x86_64-efi target and bundled x86_64 gum binary
+# are all x86_64-only. On any other arch (e.g. aarch64 — Microsoft Surface
+# Laptop 7 / Snapdragon X, ARM laptops/SBCs) it would bootstrap an x86_64 system,
+# WIPE THE DISK, then die on the first chroot exec. Refuse before anything
+# destructive. NOT bypassable: an x86_64 install cannot succeed on non-x86_64.
+is_supported_arch() {
+    case "$(uname -m 2>/dev/null)" in
+        x86_64|amd64) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ensure_dns — Add fallback nameserver if DNS resolution fails
 ensure_dns() {
     if ! ping -c 1 -W 3 alpinelinux.org &>/dev/null && ! ping -c 1 -W 3 google.com &>/dev/null; then

@@ -18,6 +18,7 @@ readonly -a INSTALL_PHASES=(
     "desktop|Desktop installation"
     "users|User configuration"
     "extras|Extra packages"
+    "umpc_quirks|UMPC quirks"
     "finalize|Finalization"
 )
 
@@ -258,6 +259,9 @@ _execute_phase() {
             install_thunderbolt_tools
             install_sensor_tools
             install_wwan_tools
+            ;;
+        umpc_quirks)
+            umpc_apply_quirks
             ;;
         finalize)
             system_finalize
